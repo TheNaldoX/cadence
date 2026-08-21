@@ -1,5 +1,11 @@
 package fr.velo.cadence.ui.map
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -7,9 +13,11 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -23,6 +31,7 @@ import org.maplibre.android.camera.CameraUpdateFactory
 import org.maplibre.android.geometry.LatLng
 import org.maplibre.android.geometry.LatLngBounds
 import org.maplibre.android.maps.MapLibreMap
+import org.maplibre.android.maps.MapLibreMapOptions
 import org.maplibre.android.maps.MapView
 import org.maplibre.android.maps.Style
 import org.maplibre.android.style.layers.CircleLayer
@@ -64,6 +73,13 @@ data class MapMarker(
 private const val MAX_TRACKS = 4
 private const val MAX_MARKERS = 4
 
+/** Etat de la carte, affiche tant que le fond n'est pas rendu. */
+private sealed interface MapState {
+    data object Loading : MapState
+    data object Ready : MapState
+    data class Failed(val reason: String) : MapState
+}
+
 @Composable
 fun CadenceMap(
     modifier: Modifier = Modifier,
@@ -81,38 +97,85 @@ fun CadenceMap(
     var map by remember { mutableStateOf<MapLibreMap?>(null) }
     var style by remember { mutableStateOf<Style?>(null) }
     var lastFitted by remember { mutableStateOf<BoundingBox?>(null) }
+    var mapState by remember { mutableStateOf<MapState>(MapState.Loading) }
 
-    AndroidView(
-        modifier = modifier,
-        factory = { context ->
-            MapView(context).also { view ->
-                view.onCreate(null)
-                mapView = view
-                view.getMapAsync { libreMap ->
-                    map = libreMap
-                    libreMap.uiSettings.apply {
-                        isRotateGesturesEnabled = interactive
-                        isTiltGesturesEnabled = false
-                        isScrollGesturesEnabled = interactive
-                        isZoomGesturesEnabled = interactive
-                        isAttributionEnabled = true
-                        isLogoEnabled = false
-                        isCompassEnabled = interactive
+    Box(modifier = modifier) {
+        AndroidView(
+            modifier = Modifier.fillMaxSize(),
+            factory = { context ->
+                // Rendu en TextureView et non en SurfaceView.
+                //
+                // Une SurfaceView est composee par le systeme dans une couche
+                // separee : dans un arbre Compose, ou la carte est posee dans
+                // un conteneur a coins arrondis et parfois dans une liste
+                // defilante, sa surface n'est jamais creee. Or MapLibre
+                // n'appelle getMapAsync qu'a la creation de cette surface :
+                // sans elle, aucun style n'est charge et la vue reste sur sa
+                // couleur d'attente, le fameux 0xFFF0E9E1. La TextureView est
+                // une vue ordinaire, dessinee dans la hierarchie, qui se
+                // decoupe et se compose normalement.
+                val options = MapLibreMapOptions.createFromAttributes(context)
+                    .textureMode(true)
+
+                MapView(context, options).also { view ->
+                    view.onCreate(null)
+                    // Demarrage explicite : le renderer ne demarre qu'a
+                    // onStart, et l'observateur de cycle de vie ci-dessous
+                    // peut n'etre attache qu'apres la premiere composition.
+                    view.onStart()
+                    view.onResume()
+                    mapView = view
+
+                    view.addOnDidFailLoadingMapListener { message ->
+                        mapState = MapState.Failed(message ?: "raison inconnue")
                     }
-                    libreMap.setStyle(Style.Builder().fromUri(styleUrl)) { loaded ->
-                        prepareLayers(loaded)
-                        style = loaded
-                    }
-                    onLongPress?.let { callback ->
-                        libreMap.addOnMapLongClickListener { latLng ->
-                            callback(GeoPoint(latLng.latitude, latLng.longitude))
-                            true
+
+                    view.getMapAsync { libreMap ->
+                        map = libreMap
+                        libreMap.uiSettings.apply {
+                            isRotateGesturesEnabled = interactive
+                            isTiltGesturesEnabled = false
+                            isScrollGesturesEnabled = interactive
+                            isZoomGesturesEnabled = interactive
+                            isAttributionEnabled = true
+                            isLogoEnabled = false
+                            isCompassEnabled = interactive
+                        }
+                        libreMap.setStyle(Style.Builder().fromUri(styleUrl)) { loaded ->
+                            prepareLayers(loaded)
+                            style = loaded
+                            mapState = MapState.Ready
+                        }
+                        onLongPress?.let { callback ->
+                            libreMap.addOnMapLongClickListener { latLng ->
+                                callback(GeoPoint(latLng.latitude, latLng.longitude))
+                                true
+                            }
                         }
                     }
                 }
+            },
+        )
+
+        // Tant que le fond n'est pas la, on le dit. Un rectangle vide laisse
+        // l'utilisateur devant un ecran muet sans savoir si ca charge ou si
+        // c'est casse.
+        if (mapState !is MapState.Ready) {
+            val message = when (val current = mapState) {
+                is MapState.Failed -> "Carte indisponible — ${current.reason}"
+                else -> "Chargement de la carte…"
             }
-        },
-    )
+            Text(
+                text = message,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.85f))
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+            )
+        }
+    }
 
     // Traces
     LaunchedEffect(style, tracks) {
