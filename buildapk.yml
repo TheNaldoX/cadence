@@ -1,0 +1,213 @@
+# ---------------------------------------------------------------------------
+# Repare l'arborescence du projet, puis compile l'APK de Cadence.
+#
+# L'envoi par glisser-deposer a mis les 93 fichiers a la racine du depot, sans
+# les dossiers. Ce workflow les remet a leur place — la correspondance a ete
+# etablie par empreinte SHA-256, fichier par fichier — enregistre l'arborescence
+# corrigee dans le depot, puis lance la compilation.
+#
+# La remise en place ne s'execute qu'une fois : aux executions suivantes les
+# fichiers sont deja au bon endroit et l'etape ne fait rien.
+# ---------------------------------------------------------------------------
+name: APK
+
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    name: Reparer l'arborescence puis compiler
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Recuperer le code
+        uses: actions/checkout@v4
+        with:
+          # Historique complet : un clone superficiel refuse le push de la
+          # remise en place, et l'action laisse HEAD detache.
+          fetch-depth: 0
+
+      - name: Remettre les fichiers a leur place
+        run: |
+          set -eu
+          move() {
+            src="$1"; dst="$2"
+            [ -e "$src" ] || return 0
+            if [ -e "$dst" ]; then rm -f "$src"; return 0; fi
+            mkdir -p "$(dirname "$dst")"
+            mv "$src" "$dst"
+            echo "  $src -> $dst"
+          }
+          echo "Remise en place :"
+          move "download" ".gitignore"
+          move "build.gradle (1).kts" "app/build.gradle.kts"
+          move "proguard-rules.pro" "app/proguard-rules.pro"
+          move "libs.versions.toml" "gradle/libs.versions.toml"
+          move "build-apk.yml" ".github/workflows/build-apk.yml"
+          move "gradle-wrapper.jar" "gradle/wrapper/gradle-wrapper.jar"
+          move "gradle-wrapper.properties" "gradle/wrapper/gradle-wrapper.properties"
+          move "AndroidManifest.xml" "app/src/main/AndroidManifest.xml"
+          move "ic_launcher_foreground.xml" "app/src/main/res/drawable/ic_launcher_foreground.xml"
+          move "ic_notification.xml" "app/src/main/res/drawable/ic_notification.xml"
+          move "ic_launcher.xml" "app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml"
+          move "ic_launcher_round.xml" "app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml"
+          move "colors (3).xml" "app/src/main/res/values-night/colors.xml"
+          move "themes (2).xml" "app/src/main/res/values-night/themes.xml"
+          move "colors.xml" "app/src/main/res/values/colors.xml"
+          move "strings.xml" "app/src/main/res/values/strings.xml"
+          move "themes.xml" "app/src/main/res/values/themes.xml"
+          move "backup_rules.xml" "app/src/main/res/xml/backup_rules.xml"
+          move "data_extraction_rules.xml" "app/src/main/res/xml/data_extraction_rules.xml"
+          move "file_paths.xml" "app/src/main/res/xml/file_paths.xml"
+          move "CadenceApp.kt" "app/src/main/java/fr/velo/cadence/CadenceApp.kt"
+          move "MainActivity.kt" "app/src/main/java/fr/velo/cadence/MainActivity.kt"
+          move "AppContainer.kt" "app/src/main/java/fr/velo/cadence/di/AppContainer.kt"
+          move "ViewModelFactories.kt" "app/src/main/java/fr/velo/cadence/di/ViewModelFactories.kt"
+          move "FitCourseWriter.kt" "app/src/main/java/fr/velo/cadence/export/FitCourseWriter.kt"
+          move "GpxParser.kt" "app/src/main/java/fr/velo/cadence/export/GpxParser.kt"
+          move "GpxWriter.kt" "app/src/main/java/fr/velo/cadence/export/GpxWriter.kt"
+          move "RouteExporter.kt" "app/src/main/java/fr/velo/cadence/export/RouteExporter.kt"
+          move "TcxWriter.kt" "app/src/main/java/fr/velo/cadence/export/TcxWriter.kt"
+          move "Geo.kt" "app/src/main/java/fr/velo/cadence/model/Geo.kt"
+          move "PolylineCodec.kt" "app/src/main/java/fr/velo/cadence/model/PolylineCodec.kt"
+          move "Ride.kt" "app/src/main/java/fr/velo/cadence/model/Ride.kt"
+          move "RiderProfile.kt" "app/src/main/java/fr/velo/cadence/model/RiderProfile.kt"
+          move "Route.kt" "app/src/main/java/fr/velo/cadence/model/Route.kt"
+          move "NavigationEngine.kt" "app/src/main/java/fr/velo/cadence/navigation/NavigationEngine.kt"
+          move "VoiceGuide.kt" "app/src/main/java/fr/velo/cadence/navigation/VoiceGuide.kt"
+          move "BRouterClient.kt" "app/src/main/java/fr/velo/cadence/net/BRouterClient.kt"
+          move "GeocodingClient.kt" "app/src/main/java/fr/velo/cadence/net/GeocodingClient.kt"
+          move "Http.kt" "app/src/main/java/fr/velo/cadence/net/Http.kt"
+          move "RideEstimator.kt" "app/src/main/java/fr/velo/cadence/routing/RideEstimator.kt"
+          move "RouteGenerator.kt" "app/src/main/java/fr/velo/cadence/routing/RouteGenerator.kt"
+          move "RouteScorer.kt" "app/src/main/java/fr/velo/cadence/routing/RouteScorer.kt"
+          move "BleSensorManager.kt" "app/src/main/java/fr/velo/cadence/sensors/BleSensorManager.kt"
+          move "SensorProfiles.kt" "app/src/main/java/fr/velo/cadence/sensors/SensorProfiles.kt"
+          move "PersonalRecords.kt" "app/src/main/java/fr/velo/cadence/stats/PersonalRecords.kt"
+          move "StatsCalculator.kt" "app/src/main/java/fr/velo/cadence/stats/StatsCalculator.kt"
+          move "BarometricAltimeter.kt" "app/src/main/java/fr/velo/cadence/tracking/BarometricAltimeter.kt"
+          move "CurrentLocation.kt" "app/src/main/java/fr/velo/cadence/tracking/CurrentLocation.kt"
+          move "GpsFilter.kt" "app/src/main/java/fr/velo/cadence/tracking/GpsFilter.kt"
+          move "LocationTrackingService.kt" "app/src/main/java/fr/velo/cadence/tracking/LocationTrackingService.kt"
+          move "RideRecorder.kt" "app/src/main/java/fr/velo/cadence/tracking/RideRecorder.kt"
+          move "CadenceDatabase.kt" "app/src/main/java/fr/velo/cadence/data/db/CadenceDatabase.kt"
+          move "UserPreferences.kt" "app/src/main/java/fr/velo/cadence/data/prefs/UserPreferences.kt"
+          move "RideRepository.kt" "app/src/main/java/fr/velo/cadence/data/repo/RideRepository.kt"
+          move "RouteRepository.kt" "app/src/main/java/fr/velo/cadence/data/repo/RouteRepository.kt"
+          move "Charts.kt" "app/src/main/java/fr/velo/cadence/ui/components/Charts.kt"
+          move "Format.kt" "app/src/main/java/fr/velo/cadence/ui/components/Format.kt"
+          move "Widgets.kt" "app/src/main/java/fr/velo/cadence/ui/components/Widgets.kt"
+          move "HistoryScreen.kt" "app/src/main/java/fr/velo/cadence/ui/history/HistoryScreen.kt"
+          move "HistoryViewModel.kt" "app/src/main/java/fr/velo/cadence/ui/history/HistoryViewModel.kt"
+          move "RideDetailScreen.kt" "app/src/main/java/fr/velo/cadence/ui/history/RideDetailScreen.kt"
+          move "RideDetailViewModel.kt" "app/src/main/java/fr/velo/cadence/ui/history/RideDetailViewModel.kt"
+          move "HomeScreen.kt" "app/src/main/java/fr/velo/cadence/ui/home/HomeScreen.kt"
+          move "HomeViewModel.kt" "app/src/main/java/fr/velo/cadence/ui/home/HomeViewModel.kt"
+          move "CadenceMap.kt" "app/src/main/java/fr/velo/cadence/ui/map/CadenceMap.kt"
+          move "CadenceNavHost.kt" "app/src/main/java/fr/velo/cadence/ui/nav/CadenceNavHost.kt"
+          move "Destinations.kt" "app/src/main/java/fr/velo/cadence/ui/nav/Destinations.kt"
+          move "PlanScreen.kt" "app/src/main/java/fr/velo/cadence/ui/plan/PlanScreen.kt"
+          move "PlanViewModel.kt" "app/src/main/java/fr/velo/cadence/ui/plan/PlanViewModel.kt"
+          move "RouteDetailScreen.kt" "app/src/main/java/fr/velo/cadence/ui/plan/RouteDetailScreen.kt"
+          move "RouteDetailViewModel.kt" "app/src/main/java/fr/velo/cadence/ui/plan/RouteDetailViewModel.kt"
+          move "ProfileScreen.kt" "app/src/main/java/fr/velo/cadence/ui/profile/ProfileScreen.kt"
+          move "ProfileViewModel.kt" "app/src/main/java/fr/velo/cadence/ui/profile/ProfileViewModel.kt"
+          move "SensorsScreen.kt" "app/src/main/java/fr/velo/cadence/ui/profile/SensorsScreen.kt"
+          move "SensorsViewModel.kt" "app/src/main/java/fr/velo/cadence/ui/profile/SensorsViewModel.kt"
+          move "RecordScreen.kt" "app/src/main/java/fr/velo/cadence/ui/record/RecordScreen.kt"
+          move "RecordViewModel.kt" "app/src/main/java/fr/velo/cadence/ui/record/RecordViewModel.kt"
+          move "StatsScreen.kt" "app/src/main/java/fr/velo/cadence/ui/stats/StatsScreen.kt"
+          move "StatsViewModel.kt" "app/src/main/java/fr/velo/cadence/ui/stats/StatsViewModel.kt"
+          move "Color.kt" "app/src/main/java/fr/velo/cadence/ui/theme/Color.kt"
+          move "Theme.kt" "app/src/main/java/fr/velo/cadence/ui/theme/Theme.kt"
+          move "Type.kt" "app/src/main/java/fr/velo/cadence/ui/theme/Type.kt"
+          move "RideDao.kt" "app/src/main/java/fr/velo/cadence/data/db/dao/RideDao.kt"
+          move "RouteDao.kt" "app/src/main/java/fr/velo/cadence/data/db/dao/RouteDao.kt"
+          move "Entities.kt" "app/src/main/java/fr/velo/cadence/data/db/entity/Entities.kt"
+          echo
+          echo "Fichiers Kotlin trouves : $(find app/src/main/java -name '*.kt' | wc -l)"
+
+      - name: Verifier que le projet est complet
+        run: |
+          set -eu
+          manquant=0
+          for f in settings.gradle.kts build.gradle.kts gradle/libs.versions.toml \
+                   app/build.gradle.kts app/src/main/AndroidManifest.xml \
+                   app/src/main/java/fr/velo/cadence/MainActivity.kt \
+                   app/src/main/res/values/strings.xml; do
+            if [ ! -f "$f" ]; then echo "MANQUE : $f"; manquant=1; fi
+          done
+          if [ "$manquant" = "1" ]; then
+            echo "Le depot est incomplet, la compilation ne peut pas aboutir."
+            exit 1
+          fi
+          echo "Projet complet."
+
+      - name: Enregistrer l'arborescence corrigee
+        continue-on-error: true
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Rien a corriger."
+          else
+            git commit -m "Remise en place de l'arborescence du projet"
+            git push origin "HEAD:${{ github.ref_name }}"
+          fi
+
+      - name: Installer le JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Installer le SDK Android
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
+
+      - name: Installer Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Compiler
+        run: gradle assembleDebug --no-daemon --no-configuration-cache --stacktrace
+
+      - name: Preparer le fichier
+        run: |
+          mkdir -p out
+          cp app/build/outputs/apk/debug/*.apk out/cadence-debug.apk
+          echo "Taille : $(du -h out/cadence-debug.apk | cut -f1)"
+
+      - name: Mettre l'APK en telechargement
+        uses: actions/upload-artifact@v4
+        with:
+          name: cadence-apk
+          path: out/cadence-debug.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publier dans les releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: apk-latest
+          name: Cadence — dernier APK de debug
+          body: |
+            APK compile automatiquement depuis le commit ${{ github.sha }}.
+
+            Ouvre cette page depuis ton telephone, telecharge le fichier, puis
+            autorise l'installation depuis cette source quand Android le demande.
+          files: out/cadence-debug.apk
+          prerelease: true
