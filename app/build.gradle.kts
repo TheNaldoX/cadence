@@ -27,10 +27,27 @@ android {
         buildConfigField("String", "MAP_STYLE_URL", "\"https://tiles.openfreemap.org/styles/liberty\"")
     }
 
+    // Trousseau de debug fixe, versionne avec le projet.
+    //
+    // Sans lui, chaque serveur de compilation genere sa propre cle et l'APK
+    // change de signature a chaque build : Android refuse alors d'installer
+    // par-dessus la version precedente et oblige a desinstaller. Ce trousseau
+    // n'est pas un secret — le mot de passe "android" est celui, public, que
+    // le SDK utilise par defaut, et il ne sert qu'aux builds de debug.
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     buildTypes {
         debug {
             applicationIdSuffix = ".debug"
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("debug")
         }
         release {
             isMinifyEnabled = true
@@ -98,7 +115,7 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
 
     implementation(libs.play.services.location)
-    implementation(libs.maplibre.android.sdk)
+    implementation(libs.osmdroid.android)
     implementation(libs.accompanist.permissions)
 
     testImplementation(libs.junit)
