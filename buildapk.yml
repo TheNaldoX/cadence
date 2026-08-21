@@ -1,13 +1,19 @@
 # ---------------------------------------------------------------------------
-# Repare l'arborescence du projet, puis compile l'APK de Cadence.
+# Repare l'arborescence du projet, regenere le wrapper Gradle, puis compile
+# l'APK de Cadence.
 #
-# L'envoi par glisser-deposer a mis les 93 fichiers a la racine du depot, sans
-# les dossiers. Ce workflow les remet a leur place — la correspondance a ete
-# etablie par empreinte SHA-256, fichier par fichier — enregistre l'arborescence
-# corrigee dans le depot, puis lance la compilation.
+# Deux problemes sont traites ici :
 #
-# La remise en place ne s'execute qu'une fois : aux executions suivantes les
-# fichiers sont deja au bon endroit et l'etape ne fait rien.
+# 1. L'envoi par glisser-deposer a depose les 93 fichiers a la racine du depot,
+#    sans les dossiers. Ils sont remis a leur place — la correspondance a ete
+#    etablie par empreinte SHA-256, fichier par fichier.
+#
+# 2. Le gradle-wrapper.jar livre avait ete assemble a la main et echouait a la
+#    validation d'empreinte de setup-gradle. Il est supprime, puis regenere par
+#    Gradle lui-meme sur le serveur : le jar obtenu est alors authentique.
+#
+# L'arborescence corrigee est enregistree dans le depot. Aux executions
+# suivantes, ces etapes ne font plus rien.
 # ---------------------------------------------------------------------------
 name: APK
 
@@ -25,7 +31,7 @@ concurrency:
 
 jobs:
   apk:
-    name: Reparer l'arborescence puis compiler
+    name: Reparer puis compiler l'APK
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
@@ -43,9 +49,10 @@ jobs:
           move() {
             src="$1"; dst="$2"
             [ -e "$src" ] || return 0
-            if [ -e "$dst" ]; then rm -f "$src"; return 0; fi
+            # Un fichier depose a la racine vient forcement d'un televersement
+            # recent : il ecrase celui deja en place.
             mkdir -p "$(dirname "$dst")"
-            mv "$src" "$dst"
+            mv -f "$src" "$dst"
             echo "  $src -> $dst"
           }
           echo "Remise en place :"
@@ -54,7 +61,6 @@ jobs:
           move "proguard-rules.pro" "app/proguard-rules.pro"
           move "libs.versions.toml" "gradle/libs.versions.toml"
           move "build-apk.yml" ".github/workflows/build-apk.yml"
-          move "gradle-wrapper.jar" "gradle/wrapper/gradle-wrapper.jar"
           move "gradle-wrapper.properties" "gradle/wrapper/gradle-wrapper.properties"
           move "AndroidManifest.xml" "app/src/main/AndroidManifest.xml"
           move "ic_launcher_foreground.xml" "app/src/main/res/drawable/ic_launcher_foreground.xml"
@@ -134,8 +140,31 @@ jobs:
           move "RideDao.kt" "app/src/main/java/fr/velo/cadence/data/db/dao/RideDao.kt"
           move "RouteDao.kt" "app/src/main/java/fr/velo/cadence/data/db/dao/RouteDao.kt"
           move "Entities.kt" "app/src/main/java/fr/velo/cadence/data/db/entity/Entities.kt"
+          # Le wrapper livre n'est pas un artefact officiel : on l'efface, il
+          # sera regenere plus bas par Gradle.
+          rm -f gradle-wrapper.jar gradle/wrapper/gradle-wrapper.jar gradlew gradlew.bat
           echo
           echo "Fichiers Kotlin trouves : $(find app/src/main/java -name '*.kt' | wc -l)"
+
+      - name: Replacer les fichiers Kotlin egares
+        run: |
+          set -eu
+          # Filet de securite pour tout televersement futur : le chemin d'un
+          # fichier Kotlin est entierement determine par sa declaration de
+          # paquet, on peut donc le remettre en place sans table de
+          # correspondance.
+          moved=0
+          for f in *.kt; do
+            [ -e "$f" ] || continue
+            pkg=$(grep -m1 '^package ' "$f" | sed 's/^package //; s/[[:space:]]*$//')
+            [ -n "$pkg" ] || continue
+            dir="app/src/main/java/$(echo "$pkg" | tr '.' '/')"
+            mkdir -p "$dir"
+            mv -f "$f" "$dir/"
+            echo "  $f -> $dir/"
+            moved=$((moved + 1))
+          done
+          echo "$moved fichier(s) Kotlin replaces d'apres leur paquet."
 
       - name: Verifier que le projet est complet
         run: |
@@ -147,11 +176,23 @@ jobs:
                    app/src/main/res/values/strings.xml; do
             if [ ! -f "$f" ]; then echo "MANQUE : $f"; manquant=1; fi
           done
-          if [ "$manquant" = "1" ]; then
-            echo "Le depot est incomplet, la compilation ne peut pas aboutir."
-            exit 1
-          fi
+          [ "$manquant" = "0" ] || { echo "Depot incomplet."; exit 1; }
           echo "Projet complet."
+
+      - name: Installer le JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Installer Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Regenerer le wrapper Gradle
+        continue-on-error: true
+        run: gradle wrapper --gradle-version 8.9 --no-daemon --no-configuration-cache
 
       - name: Enregistrer l'arborescence corrigee
         continue-on-error: true
@@ -162,25 +203,14 @@ jobs:
           if git diff --cached --quiet; then
             echo "Rien a corriger."
           else
-            git commit -m "Remise en place de l'arborescence du projet"
+            git commit -m "Remise en place de l'arborescence et wrapper Gradle authentique"
             git push origin "HEAD:${{ github.ref_name }}"
           fi
-
-      - name: Installer le JDK 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
 
       - name: Installer le SDK Android
         uses: android-actions/setup-android@v3
         with:
           packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
-
-      - name: Installer Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.9'
 
       - name: Compiler
         run: gradle assembleDebug --no-daemon --no-configuration-cache --stacktrace
