@@ -1,0 +1,206 @@
+# ---------------------------------------------------------------------------
+# Repare l'arborescence du projet, regenere le wrapper Gradle, puis compile
+# l'APK de Cadence.
+#
+# Deux problemes sont traites ici :
+#
+# 1. L'envoi par glisser-deposer a depose les 93 fichiers a la racine du depot,
+#    sans les dossiers. Ils sont remis a leur place — la correspondance a ete
+#    etablie par empreinte SHA-256, fichier par fichier.
+#
+# 2. Le gradle-wrapper.jar livre avait ete assemble a la main et echouait a la
+#    validation d'empreinte de setup-gradle. Il est supprime, puis regenere par
+#    Gradle lui-meme sur le serveur : le jar obtenu est alors authentique.
+#
+# L'arborescence corrigee est enregistree dans le depot. Aux executions
+# suivantes, ces etapes ne font plus rien.
+# ---------------------------------------------------------------------------
+name: APK
+
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    name: Reparer puis compiler l'APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Recuperer le code
+        uses: actions/checkout@v4
+        with:
+          # Historique complet : un clone superficiel refuse le push de la
+          # remise en place, et l'action laisse HEAD detache.
+          fetch-depth: 0
+
+      - name: Remettre les fichiers a leur place
+        run: |
+          set -eu
+          place() {
+            src="$1"; dst="$2"
+            [ -e "$src" ] || return 0
+            mkdir -p "$(dirname "$dst")"
+            mv -f "$src" "$dst"
+            echo "  $src -> $dst"
+          }
+
+          echo "Remise en place :"
+
+          # 1. Fichiers Kotlin : leur declaration de paquet donne leur chemin,
+          #    aucune table de correspondance n'est necessaire.
+          for f in *.kt; do
+            [ -e "$f" ] || continue
+            pkg=$(grep -m1 '^package ' "$f" | sed 's/^package //; s/[[:space:]]*$//')
+            [ -n "$pkg" ] || continue
+            place "$f" "app/src/main/java/$(echo "$pkg" | tr '.' '/')/$f"
+          done
+
+          # 2. Le build.gradle.kts du module a le meme nom que celui de la
+          #    racine : un televersement aplati ecrase donc le second par le
+          #    premier. On les distingue par leur contenu, le bloc android
+          #    n'existant que dans celui du module.
+          if [ -f build.gradle.kts ] && grep -q '^android {' build.gradle.kts; then
+            place build.gradle.kts app/build.gradle.kts
+          fi
+          if [ ! -f build.gradle.kts ]; then
+            {
+              echo 'plugins {'
+              echo '    alias(libs.plugins.android.application) apply false'
+              echo '    alias(libs.plugins.kotlin.android) apply false'
+              echo '    alias(libs.plugins.kotlin.compose) apply false'
+              echo '    alias(libs.plugins.kotlin.serialization) apply false'
+              echo '    alias(libs.plugins.ksp) apply false'
+              echo '}'
+            } > build.gradle.kts
+            echo "  build.gradle.kts de la racine reecrit"
+          fi
+
+          # 3. Fichiers dont l'emplacement ne fait aucun doute.
+          place libs.versions.toml gradle/libs.versions.toml
+          place gradle-wrapper.properties gradle/wrapper/gradle-wrapper.properties
+          place debug.keystore app/debug.keystore
+          place proguard-rules.pro app/proguard-rules.pro
+          place AndroidManifest.xml app/src/main/AndroidManifest.xml
+          place strings.xml app/src/main/res/values/strings.xml
+          place backup_rules.xml app/src/main/res/xml/backup_rules.xml
+          place data_extraction_rules.xml app/src/main/res/xml/data_extraction_rules.xml
+          place file_paths.xml app/src/main/res/xml/file_paths.xml
+          place ic_launcher_foreground.xml app/src/main/res/drawable/ic_launcher_foreground.xml
+          place ic_notification.xml app/src/main/res/drawable/ic_notification.xml
+          place ic_launcher.xml app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml
+          place ic_launcher_round.xml app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml
+
+          # 4. Couleurs et themes existent en clair et en sombre, sous le meme
+          #    nom. Le navigateur les renomme en "(1)", "(2)"... sans dire
+          #    lequel est lequel : c'est le contenu qui tranche.
+          for f in colors*.xml; do
+            [ -e "$f" ] || continue
+            if grep -q ic_launcher_background "$f"; then
+              place "$f" app/src/main/res/values/colors.xml
+            else
+              place "$f" app/src/main/res/values-night/colors.xml
+            fi
+          done
+          for f in themes*.xml; do
+            [ -e "$f" ] || continue
+            if grep -q 'Material.Light' "$f"; then
+              place "$f" app/src/main/res/values/themes.xml
+            else
+              place "$f" app/src/main/res/values-night/themes.xml
+            fi
+          done
+
+          # 5. Le wrapper livre n'est pas un artefact officiel : il est
+          #    supprime, Gradle le regenerera plus bas.
+          rm -f gradle-wrapper.jar gradle/wrapper/gradle-wrapper.jar gradlew gradlew.bat
+          # 6. Copies du workflow egarees a la racine.
+          rm -f buildapk.yml build-apk.yml
+
+          echo
+          echo "Fichiers Kotlin en place : $(find app/src/main/java -name '*.kt' | wc -l)"
+
+      - name: Verifier que le projet est complet
+        run: |
+          set -eu
+          manquant=0
+          for f in settings.gradle.kts build.gradle.kts gradle/libs.versions.toml \
+                   app/build.gradle.kts app/src/main/AndroidManifest.xml \
+                   app/src/main/java/fr/velo/cadence/MainActivity.kt \
+                   app/src/main/res/values/strings.xml; do
+            if [ ! -f "$f" ]; then echo "MANQUE : $f"; manquant=1; fi
+          done
+          [ "$manquant" = "0" ] || { echo "Depot incomplet."; exit 1; }
+          echo "Projet complet."
+
+      - name: Installer le JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Installer Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Regenerer le wrapper Gradle
+        continue-on-error: true
+        run: gradle wrapper --gradle-version 8.9 --no-daemon --no-configuration-cache
+
+      - name: Enregistrer l'arborescence corrigee
+        continue-on-error: true
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Rien a corriger."
+          else
+            git commit -m "Remise en place de l'arborescence et wrapper Gradle authentique"
+            git push origin "HEAD:${{ github.ref_name }}"
+          fi
+
+      - name: Installer le SDK Android
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
+
+      - name: Compiler
+        run: gradle assembleDebug --no-daemon --no-configuration-cache --stacktrace
+
+      - name: Preparer le fichier
+        run: |
+          mkdir -p out
+          cp app/build/outputs/apk/debug/*.apk out/cadence-debug.apk
+          echo "Taille : $(du -h out/cadence-debug.apk | cut -f1)"
+
+      - name: Mettre l'APK en telechargement
+        uses: actions/upload-artifact@v4
+        with:
+          name: cadence-apk
+          path: out/cadence-debug.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publier dans les releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: apk-latest
+          name: Cadence — dernier APK de debug
+          body: |
+            APK compile automatiquement depuis le commit ${{ github.sha }}.
+
+            Ouvre cette page depuis ton telephone, telecharge le fichier, puis
+            autorise l'installation depuis cette source quand Android le demande.
+          files: out/cadence-debug.apk
+          prerelease: true
