@@ -1,5 +1,10 @@
 package fr.velo.cadence.ui.map
 
+import android.content.Context
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.drawable.BitmapDrawable
+import android.graphics.drawable.Drawable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -12,37 +17,29 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.compose.LocalLifecycleOwner
-import fr.velo.cadence.BuildConfig
 import fr.velo.cadence.model.BoundingBox
 import fr.velo.cadence.model.Geo
 import fr.velo.cadence.model.GeoPoint
-import org.maplibre.android.camera.CameraPosition
-import org.maplibre.android.camera.CameraUpdateFactory
-import org.maplibre.android.geometry.LatLng
-import org.maplibre.android.geometry.LatLngBounds
-import org.maplibre.android.maps.MapLibreMap
-import org.maplibre.android.maps.MapLibreMapOptions
-import org.maplibre.android.maps.MapView
-import org.maplibre.android.maps.Style
-import org.maplibre.android.style.layers.CircleLayer
-import org.maplibre.android.style.layers.LineLayer
-import org.maplibre.android.style.layers.Property
-import org.maplibre.android.style.layers.PropertyFactory
-import org.maplibre.android.style.sources.GeoJsonSource
-import org.maplibre.geojson.Feature
-import org.maplibre.geojson.FeatureCollection
-import org.maplibre.geojson.LineString
-import org.maplibre.geojson.Point
+import org.osmdroid.events.MapEventsReceiver
+import org.osmdroid.tileprovider.tilesource.ITileSource
+import org.osmdroid.tileprovider.tilesource.XYTileSource
+import org.osmdroid.util.GeoPoint as OsmGeoPoint
+import org.osmdroid.views.MapView
+import org.osmdroid.views.overlay.CopyrightOverlay
+import org.osmdroid.views.overlay.MapEventsOverlay
+import org.osmdroid.views.overlay.Marker
+import org.osmdroid.views.overlay.Polyline
 
 /** Une trace a dessiner sur la carte. */
 data class MapTrack(
@@ -51,35 +48,56 @@ data class MapTrack(
     val widthDp: Float = 5f,
 )
 
-/** Un point remarquable : depart, position actuelle, arrivee. */
+/** Un point remarquable : depart, position actuelle, etape. */
 data class MapMarker(
     val point: GeoPoint,
     val color: Color,
     val radiusDp: Float = 8f,
+    val label: String? = null,
 )
 
 /**
- * Carte vectorielle MapLibre.
+ * Fonds de carte.
  *
- * Le fond de carte vient d'OpenFreeMap : vectoriel, gratuit, sans cle ni
- * compte, contrairement a Mapbox ou Google Maps. Aucune donnee de position
- * n'est envoyee a un service tiers, la carte se contente de servir des
- * tuiles.
- *
- * Le nombre de couches est volontairement fixe (au plus quatre traces) : sur
- * Android, ajouter et retirer des couches a chaque recomposition provoque des
- * scintillements et des fuites de sources.
+ * CyclOSM par defaut : c'est un rendu concu pour le velo, qui fait ressortir
+ * les voies cyclables, les revetements et la hierarchie des routes bien mieux
+ * qu'un fond generaliste. OpenTopoMap en second, pour lire le relief avant une
+ * sortie en montagne.
  */
-private const val MAX_TRACKS = 4
-private const val MAX_MARKERS = 4
+object CadenceTiles {
 
-/** Etat de la carte, affiche tant que le fond n'est pas rendu. */
-private sealed interface MapState {
-    data object Loading : MapState
-    data object Ready : MapState
-    data class Failed(val reason: String) : MapState
+    val CyclOsm: ITileSource = XYTileSource(
+        "CyclOSM", 0, 18, 256, ".png",
+        arrayOf(
+            "https://a.tile-cyclosm.openstreetmap.fr/cyclosm/",
+            "https://b.tile-cyclosm.openstreetmap.fr/cyclosm/",
+            "https://c.tile-cyclosm.openstreetmap.fr/cyclosm/",
+        ),
+        "© OpenStreetMap — rendu CyclOSM, hébergé par OpenStreetMap France",
+    )
+
+    val Topo: ITileSource = XYTileSource(
+        "OpenTopoMap", 0, 17, 256, ".png",
+        arrayOf(
+            "https://a.tile.opentopomap.org/",
+            "https://b.tile.opentopomap.org/",
+            "https://c.tile.opentopomap.org/",
+        ),
+        "© OpenStreetMap, SRTM — rendu OpenTopoMap (CC-BY-SA)",
+    )
 }
 
+private const val TRACK_OVERLAY_TAG = "cadence-track"
+private const val MARKER_OVERLAY_TAG = "cadence-marker"
+
+/**
+ * Carte de l'application.
+ *
+ * osmdroid dessine ses tuiles sur le Canvas d'une vue Android ordinaire. Ce
+ * detail est ce qui fait qu'elle fonctionne ici : un moteur a surface OpenGL
+ * n'obtient jamais sa surface quand la vue est posee dans un conteneur Compose
+ * decoupe aux coins arrondis, et reste indefiniment vide.
+ */
 @Composable
 fun CadenceMap(
     modifier: Modifier = Modifier,
@@ -89,84 +107,66 @@ fun CadenceMap(
     followPoint: GeoPoint? = null,
     followZoom: Double = 15.0,
     interactive: Boolean = true,
-    styleUrl: String = BuildConfig.MAP_STYLE_URL,
+    tileSource: ITileSource = CadenceTiles.CyclOsm,
     onLongPress: ((GeoPoint) -> Unit)? = null,
+    onTap: ((GeoPoint) -> Unit)? = null,
 ) {
     val lifecycleOwner = LocalLifecycleOwner.current
     var mapView by remember { mutableStateOf<MapView?>(null) }
-    var map by remember { mutableStateOf<MapLibreMap?>(null) }
-    var style by remember { mutableStateOf<Style?>(null) }
     var lastFitted by remember { mutableStateOf<BoundingBox?>(null) }
-    var mapState by remember { mutableStateOf<MapState>(MapState.Loading) }
+
+    // Les rappels sont lus au moment du geste : on garde la version courante
+    // sans avoir a recreer la vue quand ils changent.
+    val longPress by rememberUpdatedState(onLongPress)
+    val tap by rememberUpdatedState(onTap)
 
     Box(modifier = modifier) {
         AndroidView(
             modifier = Modifier.fillMaxSize(),
             factory = { context ->
-                // Rendu en TextureView et non en SurfaceView.
-                //
-                // Une SurfaceView est composee par le systeme dans une couche
-                // separee : dans un arbre Compose, ou la carte est posee dans
-                // un conteneur a coins arrondis et parfois dans une liste
-                // defilante, sa surface n'est jamais creee. Or MapLibre
-                // n'appelle getMapAsync qu'a la creation de cette surface :
-                // sans elle, aucun style n'est charge et la vue reste sur sa
-                // couleur d'attente, le fameux 0xFFF0E9E1. La TextureView est
-                // une vue ordinaire, dessinee dans la hierarchie, qui se
-                // decoupe et se compose normalement.
-                val options = MapLibreMapOptions.createFromAttributes(context)
-                    .textureMode(true)
+                MapView(context).apply {
+                    setTileSource(tileSource)
+                    setMultiTouchControls(interactive)
+                    setUseDataConnection(true)
+                    isHorizontalMapRepetitionEnabled = false
+                    isVerticalMapRepetitionEnabled = false
+                    zoomController.setVisibility(
+                        org.osmdroid.views.CustomZoomButtonsController.Visibility.NEVER,
+                    )
+                    controller.setZoom(5.0)
+                    controller.setCenter(OsmGeoPoint(46.6, 2.4))
 
-                MapView(context, options).also { view ->
-                    view.onCreate(null)
-                    // Demarrage explicite : le renderer ne demarre qu'a
-                    // onStart, et l'observateur de cycle de vie ci-dessous
-                    // peut n'etre attache qu'apres la premiere composition.
-                    view.onStart()
-                    view.onResume()
-                    mapView = view
+                    overlays.add(CopyrightOverlay(context))
+                    overlays.add(
+                        MapEventsOverlay(
+                            object : MapEventsReceiver {
+                                override fun singleTapConfirmedHelper(p: OsmGeoPoint?): Boolean {
+                                    val handler = tap ?: return false
+                                    p ?: return false
+                                    handler(GeoPoint(p.latitude, p.longitude))
+                                    return true
+                                }
 
-                    view.addOnDidFailLoadingMapListener { message ->
-                        mapState = MapState.Failed(message ?: "raison inconnue")
-                    }
-
-                    view.getMapAsync { libreMap ->
-                        map = libreMap
-                        libreMap.uiSettings.apply {
-                            isRotateGesturesEnabled = interactive
-                            isTiltGesturesEnabled = false
-                            isScrollGesturesEnabled = interactive
-                            isZoomGesturesEnabled = interactive
-                            isAttributionEnabled = true
-                            isLogoEnabled = false
-                            isCompassEnabled = interactive
-                        }
-                        libreMap.setStyle(Style.Builder().fromUri(styleUrl)) { loaded ->
-                            prepareLayers(loaded)
-                            style = loaded
-                            mapState = MapState.Ready
-                        }
-                        onLongPress?.let { callback ->
-                            libreMap.addOnMapLongClickListener { latLng ->
-                                callback(GeoPoint(latLng.latitude, latLng.longitude))
-                                true
-                            }
-                        }
-                    }
+                                override fun longPressHelper(p: OsmGeoPoint?): Boolean {
+                                    val handler = longPress ?: return false
+                                    p ?: return false
+                                    handler(GeoPoint(p.latitude, p.longitude))
+                                    return true
+                                }
+                            },
+                        ),
+                    )
+                    mapView = this
                 }
+            },
+            update = { view ->
+                view.setMultiTouchControls(interactive)
             },
         )
 
-        // Tant que le fond n'est pas la, on le dit. Un rectangle vide laisse
-        // l'utilisateur devant un ecran muet sans savoir si ca charge ou si
-        // c'est casse.
-        if (mapState !is MapState.Ready) {
-            val message = when (val current = mapState) {
-                is MapState.Failed -> "Carte indisponible — ${current.reason}"
-                else -> "Chargement de la carte…"
-            }
+        if (mapView == null) {
             Text(
-                text = message,
+                text = "Chargement de la carte…",
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier
@@ -177,134 +177,110 @@ fun CadenceMap(
         }
     }
 
-    // Traces
-    LaunchedEffect(style, tracks) {
-        val loaded = style ?: return@LaunchedEffect
-        for (index in 0 until MAX_TRACKS) {
-            val track = tracks.getOrNull(index)
-            val source = loaded.getSourceAs<GeoJsonSource>(trackSourceId(index)) ?: continue
-            val layer = loaded.getLayer(trackLayerId(index)) as? LineLayer
-            if (track == null || track.points.size < 2) {
-                source.setGeoJson(FeatureCollection.fromFeatures(emptyList<Feature>()))
-                continue
-            }
+    // --- traces --------------------------------------------------------------
+    LaunchedEffect(mapView, tracks) {
+        val view = mapView ?: return@LaunchedEffect
+        view.overlays.removeAll { (it as? Polyline)?.id == TRACK_OVERLAY_TAG }
+        val density = view.resources.displayMetrics.density
+        for (track in tracks) {
+            if (track.points.size < 2) continue
             // Une trace de 20 000 points fait ramer le rendu : on la simplifie
             // pour l'affichage, la trace exacte reste celle en memoire.
-            val simplified = Geo.capPoints(track.points, 3_000)
-            val line = LineString.fromLngLats(simplified.map { Point.fromLngLat(it.lon, it.lat) })
-            source.setGeoJson(Feature.fromGeometry(line))
-            layer?.setProperties(
-                PropertyFactory.lineColor(track.color.toArgb()),
-                PropertyFactory.lineWidth(track.widthDp),
-            )
-        }
-    }
-
-    // Reperes
-    LaunchedEffect(style, markers) {
-        val loaded = style ?: return@LaunchedEffect
-        for (index in 0 until MAX_MARKERS) {
-            val marker = markers.getOrNull(index)
-            val source = loaded.getSourceAs<GeoJsonSource>(markerSourceId(index)) ?: continue
-            val layer = loaded.getLayer(markerLayerId(index)) as? CircleLayer
-            if (marker == null) {
-                source.setGeoJson(FeatureCollection.fromFeatures(emptyList<Feature>()))
-                continue
+            val simplified = Geo.capPoints(track.points, 2_000)
+            val line = Polyline(view).apply {
+                id = TRACK_OVERLAY_TAG
+                setPoints(simplified.map { OsmGeoPoint(it.lat, it.lon) })
+                outlinePaint.color = track.color.toArgb()
+                outlinePaint.strokeWidth = track.widthDp * density
+                outlinePaint.strokeCap = Paint.Cap.ROUND
+                outlinePaint.strokeJoin = Paint.Join.ROUND
+                outlinePaint.isAntiAlias = true
+                isGeodesic = false
             }
-            source.setGeoJson(
-                Feature.fromGeometry(Point.fromLngLat(marker.point.lon, marker.point.lat)),
-            )
-            layer?.setProperties(
-                PropertyFactory.circleColor(marker.color.toArgb()),
-                PropertyFactory.circleRadius(marker.radiusDp),
-            )
+            view.overlays.add(line)
         }
+        view.invalidate()
     }
 
-    // Cadrage
-    LaunchedEffect(map, fitBounds) {
-        val libreMap = map ?: return@LaunchedEffect
+    // --- reperes -------------------------------------------------------------
+    LaunchedEffect(mapView, markers) {
+        val view = mapView ?: return@LaunchedEffect
+        view.overlays.removeAll { (it as? Marker)?.id == MARKER_OVERLAY_TAG }
+        for (marker in markers) {
+            val item = Marker(view).apply {
+                id = MARKER_OVERLAY_TAG
+                position = OsmGeoPoint(marker.point.lat, marker.point.lon)
+                setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
+                icon = dotDrawable(view.context, marker.color.toArgb(), marker.radiusDp)
+                title = marker.label
+                setInfoWindow(null)
+            }
+            view.overlays.add(item)
+        }
+        view.invalidate()
+    }
+
+    // --- cadrage -------------------------------------------------------------
+    LaunchedEffect(mapView, fitBounds) {
+        val view = mapView ?: return@LaunchedEffect
         val bounds = fitBounds ?: return@LaunchedEffect
         if (bounds == lastFitted) return@LaunchedEffect
         lastFitted = bounds
         runCatching {
-            val latLngBounds = LatLngBounds.Builder()
-                .include(LatLng(bounds.north, bounds.east))
-                .include(LatLng(bounds.south, bounds.west))
-                .build()
-            libreMap.animateCamera(CameraUpdateFactory.newLatLngBounds(latLngBounds, 80), 600)
-        }
-    }
-
-    // Suivi de la position pendant la sortie
-    LaunchedEffect(map, followPoint) {
-        val libreMap = map ?: return@LaunchedEffect
-        val point = followPoint ?: return@LaunchedEffect
-        runCatching {
-            libreMap.animateCamera(
-                CameraUpdateFactory.newCameraPosition(
-                    CameraPosition.Builder()
-                        .target(LatLng(point.lat, point.lon))
-                        .zoom(followZoom)
-                        .build(),
+            view.zoomToBoundingBox(
+                org.osmdroid.util.BoundingBox(
+                    bounds.north, bounds.east, bounds.south, bounds.west,
                 ),
-                800,
+                true,
+                48,
             )
         }
     }
 
+    // --- suivi de la position pendant la sortie -------------------------------
+    LaunchedEffect(mapView, followPoint) {
+        val view = mapView ?: return@LaunchedEffect
+        val point = followPoint ?: return@LaunchedEffect
+        view.controller.animateTo(OsmGeoPoint(point.lat, point.lon), followZoom, 600L)
+    }
+
+    // --- cycle de vie ---------------------------------------------------------
     DisposableEffect(lifecycleOwner, mapView) {
         val view = mapView
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
-                Lifecycle.Event.ON_START -> view?.onStart()
                 Lifecycle.Event.ON_RESUME -> view?.onResume()
                 Lifecycle.Event.ON_PAUSE -> view?.onPause()
-                Lifecycle.Event.ON_STOP -> view?.onStop()
-                Lifecycle.Event.ON_DESTROY -> view?.onDestroy()
                 else -> Unit
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(observer)
-            view?.onStop()
-            view?.onDestroy()
+            view?.onPause()
+            view?.onDetach()
         }
     }
 }
 
-private fun trackSourceId(index: Int) = "cadence-track-source-$index"
-private fun trackLayerId(index: Int) = "cadence-track-layer-$index"
-private fun markerSourceId(index: Int) = "cadence-marker-source-$index"
-private fun markerLayerId(index: Int) = "cadence-marker-layer-$index"
-
 /**
- * Cree une fois pour toutes les sources et couches ; leur contenu sera
- * remplace au fil des recompositions.
+ * Petit disque plein cercle blanc, dessine a la volee : cela evite d'embarquer
+ * des images de marqueur pour chaque couleur et chaque densite d'ecran.
  */
-private fun prepareLayers(style: Style) {
-    for (index in 0 until MAX_TRACKS) {
-        if (style.getSource(trackSourceId(index)) != null) continue
-        style.addSource(GeoJsonSource(trackSourceId(index)))
-        style.addLayer(
-            LineLayer(trackLayerId(index), trackSourceId(index)).withProperties(
-                PropertyFactory.lineCap(Property.LINE_CAP_ROUND),
-                PropertyFactory.lineJoin(Property.LINE_JOIN_ROUND),
-                PropertyFactory.lineWidth(5f),
-                PropertyFactory.lineOpacity(0.9f),
-            ),
-        )
-    }
-    for (index in 0 until MAX_MARKERS) {
-        if (style.getSource(markerSourceId(index)) != null) continue
-        style.addSource(GeoJsonSource(markerSourceId(index)))
-        style.addLayer(
-            CircleLayer(markerLayerId(index), markerSourceId(index)).withProperties(
-                PropertyFactory.circleRadius(8f),
-                PropertyFactory.circleStrokeWidth(2.5f),
-                PropertyFactory.circleStrokeColor(android.graphics.Color.WHITE),
-            ),
-        )
-    }
+private fun dotDrawable(context: Context, color: Int, radiusDp: Float): Drawable {
+    val density = context.resources.displayMetrics.density
+    val radius = radiusDp * density
+    val ring = 2.5f * density
+    val size = ((radius + ring) * 2).toInt().coerceAtLeast(4)
+    val bitmap = android.graphics.Bitmap.createBitmap(
+        size, size, android.graphics.Bitmap.Config.ARGB_8888,
+    )
+    val canvas = Canvas(bitmap)
+    val center = size / 2f
+    val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+    paint.color = android.graphics.Color.WHITE
+    canvas.drawCircle(center, center, radius + ring, paint)
+    paint.color = color
+    canvas.drawCircle(center, center, radius, paint)
+    return BitmapDrawable(context.resources, bitmap)
 }

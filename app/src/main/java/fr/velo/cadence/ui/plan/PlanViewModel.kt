@@ -15,6 +15,7 @@ import fr.velo.cadence.model.PlannedRoute
 import fr.velo.cadence.model.RoadStyle
 import fr.velo.cadence.model.RouteCandidate
 import fr.velo.cadence.model.RouteRequest
+import fr.velo.cadence.model.RouteSource
 import fr.velo.cadence.model.TerrainPreference
 import fr.velo.cadence.net.Place
 import fr.velo.cadence.routing.RideEstimator
@@ -30,7 +31,19 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
+/** Deux facons de composer une sortie. */
+enum class PlanMode(val label: String) {
+    AUTOMATIQUE("Boucle proposée"),
+    MANUEL("Tracé manuel"),
+}
+
 data class PlanUiState(
+    val mode: PlanMode = PlanMode.AUTOMATIQUE,
+    /** Etapes posees sur la carte, dans l'ordre de passage. */
+    val waypoints: List<GeoPoint> = emptyList(),
+    val manualLoop: Boolean = true,
+    val manualRoute: PlannedRoute? = null,
+    val computing: Boolean = false,
     val start: GeoPoint? = null,
     val startLabel: String = "",
     val targetDistanceKm: Float = 50f,
@@ -114,6 +127,109 @@ class PlanViewModel(
 
     fun clearSearch() {
         _state.update { it.copy(searchResults = emptyList()) }
+    }
+
+    fun setMode(mode: PlanMode) {
+        _state.update { it.copy(mode = mode, error = null) }
+    }
+
+    /** Ajoute une etape a la suite des precedentes. */
+    fun addWaypoint(point: GeoPoint) {
+        _state.update { it.copy(waypoints = it.waypoints + point, manualRoute = null) }
+    }
+
+    fun removeWaypoint(index: Int) {
+        _state.update { current ->
+            if (index !in current.waypoints.indices) current
+            else current.copy(
+                waypoints = current.waypoints.filterIndexed { i, _ -> i != index },
+                manualRoute = null,
+            )
+        }
+    }
+
+    fun moveWaypoint(index: Int, offset: Int) {
+        _state.update { current ->
+            val target = index + offset
+            if (index !in current.waypoints.indices || target !in current.waypoints.indices) {
+                current
+            } else {
+                val list = current.waypoints.toMutableList()
+                val moved = list.removeAt(index)
+                list.add(target, moved)
+                current.copy(waypoints = list, manualRoute = null)
+            }
+        }
+    }
+
+    fun clearWaypoints() {
+        _state.update { it.copy(waypoints = emptyList(), manualRoute = null) }
+    }
+
+    fun setManualLoop(loop: Boolean) {
+        _state.update { it.copy(manualLoop = loop, manualRoute = null) }
+    }
+
+    /**
+     * Calcule l'itineraire qui passe par le depart puis par chaque etape, dans
+     * l'ordre. BRouter route de point en point : c'est le meme moteur que pour
+     * les boucles proposees, donc les memes preferences de revetement et de
+     * trafic s'appliquent.
+     */
+    fun computeManualRoute() {
+        val current = _state.value
+        val start = current.start ?: run {
+            _state.update { it.copy(error = "Choisis d'abord un point de départ.") }
+            return
+        }
+        if (current.waypoints.isEmpty()) {
+            _state.update { it.copy(error = "Touche la carte pour poser au moins une étape.") }
+            return
+        }
+        generationJob?.cancel()
+        generationJob = viewModelScope.launch {
+            _state.update { it.copy(computing = true, error = null) }
+            val profile = container.userPreferences.profile.first()
+            val waypoints = buildList {
+                add(start)
+                addAll(current.waypoints)
+                if (current.manualLoop) add(start)
+            }
+            runCatching {
+                container.bRouterClient.route(waypoints, current.roadStyle.brouterProfile)
+            }.onSuccess { track ->
+                val route = PlannedRoute(
+                    name = manualName(current, track.distanceM),
+                    points = track.points,
+                    distanceM = track.distanceM,
+                    ascentM = track.ascentM,
+                    descentM = track.descentM,
+                    instructions = track.instructions,
+                    surface = track.surface,
+                    estimatedDurationMs = RideEstimator.estimateDuration(
+                        points = track.points,
+                        profile = profile,
+                        junctionCount = track.instructions.size,
+                    ),
+                    source = RouteSource.MANUAL,
+                )
+                _state.update { it.copy(computing = false, manualRoute = route) }
+            }.onFailure { error ->
+                _state.update {
+                    it.copy(
+                        computing = false,
+                        error = error.message ?: "Impossible de relier ces points.",
+                    )
+                }
+            }
+        }
+    }
+
+    private fun manualName(state: PlanUiState, distanceM: Double): String {
+        val km = (distanceM / 1000.0).toInt()
+        val place = state.startLabel.substringBefore(',').trim()
+        val kind = if (state.manualLoop) "Boucle" else "Parcours"
+        return if (place.isBlank()) "$kind tracé de $km km" else "$kind de $km km depuis $place"
     }
 
     fun setDistance(km: Float) {

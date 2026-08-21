@@ -35,6 +35,12 @@ import kotlin.math.roundToInt
  * parcours a 800 m de D+ etale sur 100 km n'a rien a voir avec le meme
  * denivele concentre sur deux cols.
  */
+
+/**
+ * Profil altimetrique non interactif, pour les vignettes et les resumes.
+ * Delegue au composant complet afin qu'il n'existe qu'un seul rendu de profil
+ * dans l'application, avec le meme lissage et le meme bareme de couleurs.
+ */
 @Composable
 fun ElevationChart(
     points: List<GeoPoint>,
@@ -42,115 +48,14 @@ fun ElevationChart(
     progress: Float? = null,
     showAxis: Boolean = true,
 ) {
-    val elevations = points.mapNotNull { it.ele }
-    if (points.size < 2 || elevations.size < 2) {
-        Box(modifier = modifier, contentAlignment = Alignment.Center) {
-            Text(
-                text = "Profil altimétrique indisponible",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        return
-    }
-
-    val minEle = elevations.min()
-    val maxEle = elevations.max()
-    val span = (maxEle - minEle).coerceAtLeast(20.0)
-    val cumulative = Geo.cumulativeDistances(points)
-    val total = cumulative.last().coerceAtLeast(1.0)
-    val outline = MaterialTheme.colorScheme.outline
-    val marker = MaterialTheme.colorScheme.primary
-
-    Column(modifier = modifier) {
-        Canvas(modifier = Modifier.fillMaxWidth().weight(1f)) {
-            val width = size.width
-            val height = size.height
-
-            fun x(index: Int) = (cumulative[index] / total * width).toFloat()
-            fun y(elevation: Double) =
-                (height - ((elevation - minEle) / span * height * 0.88 + height * 0.06)).toFloat()
-
-            // Une barre verticale par tranche, coloree selon la pente locale.
-            // Plus lisible qu'un degrade continu et beaucoup moins couteux a
-            // dessiner qu'un chemin par point sur une trace de 20 000 points.
-            val slices = 160
-            for (slice in 0 until slices) {
-                val startRatio = slice.toDouble() / slices
-                val endRatio = (slice + 1.0) / slices
-                val startIndex = indexAtRatio(cumulative, total, startRatio)
-                val endIndex = indexAtRatio(cumulative, total, endRatio)
-                if (endIndex <= startIndex) continue
-
-                val startEle = points[startIndex].ele ?: continue
-                val endEle = points[endIndex].ele ?: continue
-                val run = cumulative[endIndex] - cumulative[startIndex]
-                val grade = if (run > 1.0) (endEle - startEle) / run * 100.0 else 0.0
-
-                val path = Path().apply {
-                    moveTo(x(startIndex), height)
-                    lineTo(x(startIndex), y(startEle))
-                    lineTo(x(endIndex), y(endEle))
-                    lineTo(x(endIndex), height)
-                    close()
-                }
-                drawPath(path, color = gradientColor(grade).copy(alpha = 0.85f))
-            }
-
-            // Ligne de crete
-            val ridge = Path()
-            ridge.moveTo(x(0), y(points[0].ele ?: minEle))
-            for (i in 1 until points.size) {
-                val ele = points[i].ele ?: continue
-                ridge.lineTo(x(i), y(ele))
-            }
-            drawPath(ridge, color = outline, style = Stroke(width = 1.5f))
-
-            progress?.let {
-                val position = width * it.coerceIn(0f, 1f)
-                drawLine(
-                    color = marker,
-                    start = androidx.compose.ui.geometry.Offset(position, 0f),
-                    end = androidx.compose.ui.geometry.Offset(position, height),
-                    strokeWidth = 3f,
-                )
-            }
-        }
-
-        if (showAxis) {
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-            ) {
-                Text(
-                    text = "${minEle.roundToInt()} m",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Text(
-                    text = "${(total / 1000).roundToInt()} km",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Text(
-                    text = "${maxEle.roundToInt()} m",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
-    }
-}
-
-private fun indexAtRatio(cumulative: DoubleArray, total: Double, ratio: Double): Int {
-    val target = total * ratio
-    var low = 0
-    var high = cumulative.lastIndex
-    while (low < high) {
-        val mid = (low + high) / 2
-        if (cumulative[mid] < target) low = mid + 1 else high = mid
-    }
-    return low
+    ElevationProfile(
+        points = points,
+        modifier = modifier,
+        interactive = false,
+        showAxis = showAxis,
+        showReadout = false,
+        progress = progress,
+    )
 }
 
 /** Code couleur des pentes, proche des conventions des applications velo. */

@@ -1,10 +1,12 @@
 package fr.velo.cadence.ui.plan
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -45,17 +47,23 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import fr.velo.cadence.export.ExportFormat
+import fr.velo.cadence.routing.Climb
+import fr.velo.cadence.routing.ClimbDetector
 import fr.velo.cadence.ui.components.Chip
 import fr.velo.cadence.ui.components.ElevationChart
+import fr.velo.cadence.ui.components.ElevationProfile
 import fr.velo.cadence.ui.components.Format
 import fr.velo.cadence.ui.components.MetricTile
+import fr.velo.cadence.ui.components.ProfileReadout
 import fr.velo.cadence.ui.components.SectionCard
+import fr.velo.cadence.ui.components.gradientColor
 import fr.velo.cadence.ui.map.CadenceMap
 import fr.velo.cadence.ui.map.MapMarker
 import fr.velo.cadence.ui.map.MapTrack
@@ -71,6 +79,18 @@ fun RouteDetailScreen(
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
+    // Point designe par le doigt sur le profil : on le repercute sur la carte.
+    var scrub by remember { mutableStateOf<ProfileReadout?>(null) }
+    val routePoints = state.route?.points
+    val climbs = remember(routePoints) {
+        routePoints?.let { ClimbDetector.detect(it) } ?: emptyList()
+    }
+    val scrubPoint = remember(routePoints, scrub) {
+        val points = routePoints
+        val readout = scrub
+        if (points == null || readout == null) null
+        else points.getOrNull(ClimbDetector.pointIndexAt(points, readout.distanceM))
+    }
     val snackbar = remember { SnackbarHostState() }
     var format by remember { mutableStateOf(ExportFormat.GPX) }
 
@@ -134,7 +154,10 @@ fun RouteDetailScreen(
                         tracks = listOf(MapTrack(route.points, TrackBlue, 6f)),
                         markers = listOfNotNull(
                             route.points.firstOrNull()?.let {
-                                MapMarker(it, MaterialTheme.colorScheme.primary, 9f)
+                                MapMarker(it, MaterialTheme.colorScheme.primary, 9f, "Départ")
+                            },
+                            scrubPoint?.let {
+                                MapMarker(it, MaterialTheme.colorScheme.secondary, 8f)
                             },
                         ),
                         fitBounds = route.bounds,
@@ -179,13 +202,40 @@ fun RouteDetailScreen(
 
             item {
                 SectionCard(title = "Profil altimétrique") {
-                    ElevationChart(
+                    ElevationProfile(
                         points = route.points,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(150.dp)
+                            .height(190.dp)
                             .padding(top = 12.dp),
+                        climbs = climbs,
+                        interactive = true,
+                        onScrub = { scrub = it },
                     )
+                }
+            }
+
+            if (climbs.isNotEmpty()) {
+                item {
+                    SectionCard(
+                        title = "Côtes (${climbs.size})",
+                        trailing = {
+                            Text(
+                                text = "+${climbs.sumOf { it.gainM }.toInt()} m au total",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        },
+                    ) {
+                        Column(Modifier.padding(top = 10.dp)) {
+                            climbs.forEachIndexed { index, climb ->
+                                ClimbRow(climb)
+                                if (index < climbs.lastIndex) {
+                                    Spacer(Modifier.height(12.dp))
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -391,4 +441,81 @@ internal fun surfaceLabel(surface: String): String = when (surface) {
     "grass" -> "Herbe"
     "unknown" -> "Non renseigné"
     else -> surface.replaceFirstChar { it.uppercase() }
+}
+
+/**
+ * Une ascension : sa categorie, ses chiffres, et le detail kilometre par
+ * kilometre. C'est la lecture qu'on fait devant une pancarte de col, et celle
+ * qui dit vraiment ou ca va faire mal.
+ */
+@Composable
+private fun ClimbRow(climb: Climb) {
+    Column(Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(gradientColor(climb.avgGradient))
+                        .padding(horizontal = 7.dp, vertical = 2.dp),
+                ) {
+                    Text(
+                        text = climb.category.shortLabel,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = Color.Black,
+                    )
+                }
+                Text(
+                    text = "  ${climb.summary}",
+                    style = MaterialTheme.typography.titleMedium,
+                )
+            }
+            Text(
+                text = "+${climb.gainM.toInt()} m",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+
+        Text(
+            text = "du km %.1f au km %.1f · max %.1f %% · sommet à %d m".format(
+                java.util.Locale.FRANCE,
+                climb.startDistanceM / 1000.0,
+                climb.endDistanceM / 1000.0,
+                climb.maxGradient,
+                climb.topElevationM.toInt(),
+            ),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 2.dp),
+        )
+
+        if (climb.gradientPerKm.isNotEmpty()) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(3.dp),
+            ) {
+                climb.gradientPerKm.forEach { gradient ->
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(22.dp)
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(gradientColor(gradient)),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            text = "%.0f".format(gradient),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color.Black,
+                        )
+                    }
+                }
+            }
+        }
+    }
 }

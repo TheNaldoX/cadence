@@ -9,9 +9,9 @@
 }
 -keep,includedescriptorclasses class fr.velo.cadence.**$$serializer { *; }
 
-# MapLibre
--keep class org.maplibre.** { *; }
--dontwarn org.maplibre.**
+# osmdroid
+-keep class org.osmdroid.** { *; }
+-dontwarn org.osmdroid.**
 
 # OkHttp
 -dontwarn okhttp3.**
