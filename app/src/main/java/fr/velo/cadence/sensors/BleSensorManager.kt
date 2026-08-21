@@ -7,6 +7,7 @@ import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCallback
 import android.bluetooth.BluetoothGattCharacteristic
+import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
 import android.bluetooth.le.ScanCallback
@@ -247,9 +248,9 @@ class BleSensorManager(private val context: Context) {
         val descriptor = characteristic.getDescriptor(SensorProfiles.CLIENT_CHARACTERISTIC_CONFIG)
             ?: return
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            gatt.writeDescriptor(descriptor, BluetoothGattCharacteristic.ENABLE_NOTIFICATION_VALUE)
+            gatt.writeDescriptor(descriptor, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
         } else {
-            descriptor.value = BluetoothGattCharacteristic.ENABLE_NOTIFICATION_VALUE
+            descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
             gatt.writeDescriptor(descriptor)
         }
     }
